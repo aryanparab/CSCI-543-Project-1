@@ -1,0 +1,123 @@
+diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
+index e0bbb97..669b5f4 100644
+--- a/src/backend/access/nbtree/nbtsearch.c
++++ b/src/backend/access/nbtree/nbtsearch.c
+@@ -379,8 +379,23 @@ _bt_binsrch(Relation rel,
+ 	 * We can fall out when high == low.
+ 	 */
+ 	high++;						/* establish the loop invariant for high */
+-
++	
+ 	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
++	
++	if ( btree_binsrch_linear && (high - low)<=btree_binsrch_linear_threshold){
++		OffsetNumber i ;
++		for( i = low; i <high;i++){
++
++			result = _bt_compare(rel, key, page, i);
++			if (result <cmpval)
++				{
++					break;
++				}
++				
++		}
++		low = i;
++	}
++	else{
+ 
+ 	while (high > low)
+ 	{
+@@ -395,6 +410,7 @@ _bt_binsrch(Relation rel,
+ 		else
+ 			high = mid;
+ 	}
++}
+ 
+ 	/*
+ 	 * At this point we have high == low.
+diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
+index 878f4b2..b74148d 100644
+--- a/src/backend/access/nbtree/nbtutils.c
++++ b/src/backend/access/nbtree/nbtutils.c
+@@ -32,6 +32,11 @@
+ #define LOOK_AHEAD_REQUIRED_RECHECKS 	3
+ #define LOOK_AHEAD_DEFAULT_DISTANCE 	5
+ 
++
++bool btree_leaf_prefetch = false;
++bool btree_binsrch_linear = false;
++int btree_binsrch_linear_threshold = 4;
++
+ typedef struct BTSortArrayContext
+ {
+ 	FmgrInfo   *sortproc;
+diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
+index c42fccf..04ce87c 100644
+--- a/src/backend/utils/misc/guc_tables.c
++++ b/src/backend/utils/misc/guc_tables.c
+@@ -26,6 +26,7 @@
+ #include <syslog.h>
+ #endif
+ 
++#include "access/nbtree.h"
+ #include "access/commit_ts.h"
+ #include "access/gin.h"
+ #include "access/slru.h"
+@@ -780,6 +781,24 @@ struct config_bool ConfigureNamesBool[] =
+ 		true,
+ 		NULL, NULL, NULL
+ 	},
++	{
++		{"btree_leaf_prefetch",PGC_USERSET,QUERY_TUNING_OTHER,
++		gettext_noop("Enables prefetching of next leaf page during B-tree scans,"),
++		NULL
++	},
++	&btree_leaf_prefetch,
++	false,NULL,NULL,NULL
++	},
++	{
++		{
++			"btree_binsrch_linear",PGC_USERSET,QUERY_TUNING_OTHER,
++			gettext_noop("Enables Linear Search for small B-tree lead pages."),
++			NULL
++		},
++		&btree_binsrch_linear,
++		false,NULL,NULL,NULL
++
++	},
+ 	{
+ 		{"enable_indexscan", PGC_USERSET, QUERY_TUNING_METHOD,
+ 			gettext_noop("Enables the planner's use of index-scan plans."),
+@@ -2046,6 +2065,17 @@ struct config_int ConfigureNamesInt[] =
+ 		0, 0, INT_MAX / 2,
+ 		NULL, NULL, NULL
+ 	},
++	{
++		{
++			"btree_binsrch_linear_threshold",PGC_USERSET,QUERY_TUNING_OTHER,
++			gettext_noop("Threshold to switch to linear search instead of binary search"),
++			NULL,
++		},
++		&btree_binsrch_linear_threshold,
++		4,1,32,
++		NULL,NULL,NULL
++
++	},
+ 	{
+ 		{"post_auth_delay", PGC_BACKEND, DEVELOPER_OPTIONS,
+ 			gettext_noop("Sets the amount of time to wait after "
+diff --git a/src/include/access/nbtree.h b/src/include/access/nbtree.h
+index 7493043..a006d28 100644
+--- a/src/include/access/nbtree.h
++++ b/src/include/access/nbtree.h
+@@ -1281,6 +1281,10 @@ extern bool _bt_first(IndexScanDesc scan, ScanDirection dir);
+ extern bool _bt_next(IndexScanDesc scan, ScanDirection dir);
+ extern Buffer _bt_get_endpoint(Relation rel, uint32 level, bool rightmost);
+ 
++extern bool btree_leaf_prefetch;
++extern bool btree_binsrch_linear;
++extern int btree_binsrch_linear_threshold;
++
+ /*
+  * prototypes for functions in nbtutils.c
+  */
