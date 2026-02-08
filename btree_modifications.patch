@@ -1,28 +1,5 @@
-diff --git a/bin/postgres b/bin/postgres
-index 3e923c0..24bb682 100755
-Binary files a/bin/postgres and b/bin/postgres differ
-diff --git a/logfile b/logfile
-index 4817336..8dde9ce 100644
---- a/logfile
-+++ b/logfile
-@@ -21,3 +21,15 @@
- 2026-02-02 22:12:01.972 UTC [95508] LOG:  database system is ready to accept connections
- 2026-02-02 22:17:02.032 UTC [95509] LOG:  checkpoint starting: time
- 2026-02-02 22:17:02.077 UTC [95509] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.023 s, sync=0.002 s, total=0.049 s; sync files=2, longest=0.002 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC518, redo lsn=9/E5DC4C0
-+2026-02-03 08:01:01.488 UTC [44342] LOG:  starting PostgreSQL 17.4 on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, 64-bit
-+2026-02-03 08:01:01.494 UTC [44342] LOG:  listening on IPv6 address "::1", port 5432
-+2026-02-03 08:01:01.494 UTC [44342] LOG:  listening on IPv4 address "127.0.0.1", port 5432
-+2026-02-03 08:01:01.496 UTC [44342] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
-+2026-02-03 08:01:01.502 UTC [44345] LOG:  database system was interrupted; last known up at 2026-02-02 22:17:02 UTC
-+2026-02-03 08:01:01.569 UTC [44345] LOG:  database system was not properly shut down; automatic recovery in progress
-+2026-02-03 08:01:01.571 UTC [44345] LOG:  redo starts at 9/E5DC4C0
-+2026-02-03 08:01:01.571 UTC [44345] LOG:  invalid record length at 9/E5DC5C8: expected at least 24, got 0
-+2026-02-03 08:01:01.571 UTC [44345] LOG:  redo done at 9/E5DC590 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
-+2026-02-03 08:01:01.574 UTC [44343] LOG:  checkpoint starting: end-of-recovery immediate wait
-+2026-02-03 08:01:01.577 UTC [44343] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.004 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC5C8, redo lsn=9/E5DC5C8
-+2026-02-03 08:01:01.580 UTC [44342] LOG:  database system is ready to accept connections
 diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
-index e0bbb97..3513ea5 100644
+index e0bbb97..669b5f4 100644
 --- a/src/backend/access/nbtree/nbtsearch.c
 +++ b/src/backend/access/nbtree/nbtsearch.c
 @@ -379,8 +379,23 @@ _bt_binsrch(Relation rel,
@@ -58,17 +35,6 @@ index e0bbb97..3513ea5 100644
  
  	/*
  	 * At this point we have high == low.
-@@ -1632,7 +1648,9 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
- 
- 	/* initialize tuple workspace to empty */
- 	so->currPos.nextTupleOffset = 0;
--
-+	if(btree_leaf_prefetch &&  !P_RIGHTMOST(opaque) &&  P_ISLEAF(opaque)){
-+	PrefetchBuffer(scan->indexRelation,MAIN_FORKNUM,so->currPos.nextPage);
-+	}
- 	/*
- 	 * Now that the current page has been made consistent, the macro should be
- 	 * good.
 diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
 index 878f4b2..b74148d 100644
 --- a/src/backend/access/nbtree/nbtutils.c
