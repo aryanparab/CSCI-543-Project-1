@@ -1,8 +1,31 @@
+diff --git a/bin/postgres b/bin/postgres
+index 3e923c0..24bb682 100755
+Binary files a/bin/postgres and b/bin/postgres differ
+diff --git a/logfile b/logfile
+index 4817336..8dde9ce 100644
+--- a/logfile
++++ b/logfile
+@@ -21,3 +21,15 @@
+ 2026-02-02 22:12:01.972 UTC [95508] LOG:  database system is ready to accept connections
+ 2026-02-02 22:17:02.032 UTC [95509] LOG:  checkpoint starting: time
+ 2026-02-02 22:17:02.077 UTC [95509] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.023 s, sync=0.002 s, total=0.049 s; sync files=2, longest=0.002 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC518, redo lsn=9/E5DC4C0
++2026-02-03 08:01:01.488 UTC [44342] LOG:  starting PostgreSQL 17.4 on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, 64-bit
++2026-02-03 08:01:01.494 UTC [44342] LOG:  listening on IPv6 address "::1", port 5432
++2026-02-03 08:01:01.494 UTC [44342] LOG:  listening on IPv4 address "127.0.0.1", port 5432
++2026-02-03 08:01:01.496 UTC [44342] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
++2026-02-03 08:01:01.502 UTC [44345] LOG:  database system was interrupted; last known up at 2026-02-02 22:17:02 UTC
++2026-02-03 08:01:01.569 UTC [44345] LOG:  database system was not properly shut down; automatic recovery in progress
++2026-02-03 08:01:01.571 UTC [44345] LOG:  redo starts at 9/E5DC4C0
++2026-02-03 08:01:01.571 UTC [44345] LOG:  invalid record length at 9/E5DC5C8: expected at least 24, got 0
++2026-02-03 08:01:01.571 UTC [44345] LOG:  redo done at 9/E5DC590 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
++2026-02-03 08:01:01.574 UTC [44343] LOG:  checkpoint starting: end-of-recovery immediate wait
++2026-02-03 08:01:01.577 UTC [44343] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.004 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC5C8, redo lsn=9/E5DC5C8
++2026-02-03 08:01:01.580 UTC [44342] LOG:  database system is ready to accept connections
 diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
-index e0bbb97..669b5f4 100644
+index e0bbb97..2e47c17 100644
 --- a/src/backend/access/nbtree/nbtsearch.c
 +++ b/src/backend/access/nbtree/nbtsearch.c
-@@ -379,8 +379,23 @@ _bt_binsrch(Relation rel,
+@@ -379,8 +379,35 @@ _bt_binsrch(Relation rel,
  	 * We can fall out when high == low.
  	 */
  	high++;						/* establish the loop invariant for high */
@@ -10,24 +33,36 @@ index e0bbb97..669b5f4 100644
 +	
  	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
 +	
-+	if ( btree_binsrch_linear && (high - low)<=btree_binsrch_linear_threshold){
-+		OffsetNumber i ;
-+		for( i = low; i <high;i++){
 +
-+			result = _bt_compare(rel, key, page, i);
-+			if (result <cmpval)
-+				{
-+					break;
-+				}
-+				
++
++	if (btree_binsrch_linear && P_ISLEAF(opaque))
++	{
++		int			n = high - low + 1;
++
++		if (n >= 2 && n <= btree_binsrch_linear_threshold)
++		{
++			// if (Debug_print_plan) elog(NOTICE, "nbtsearch.c: _bt_binsrch: btree binsrch linear triggered: n=%d threshold=%d dir=%s",
++			// 	 n, btree_binsrch_linear_threshold,
++			// 	 key->backward ? "backward" : "forward");
++			cmpval = key->nextkey ? 0 : 1;
++			if (key->backward)
++			{
++				for (OffsetNumber i = high; i >= low; i = OffsetNumberPrev(i))
++					if (_bt_compare(rel, key, page, i) < cmpval)
++						return i;
++				return OffsetNumberPrev(low);
++			}
++			for (OffsetNumber i = low; i <= high; i = OffsetNumberNext(i))
++				if (_bt_compare(rel, key, page, i) >= cmpval)
++					return i;
++			return OffsetNumberNext(high);
 +		}
-+		low = i;
 +	}
 +	else{
  
  	while (high > low)
  	{
-@@ -395,6 +410,7 @@ _bt_binsrch(Relation rel,
+@@ -395,6 +422,7 @@ _bt_binsrch(Relation rel,
  		else
  			high = mid;
  	}
@@ -35,6 +70,34 @@ index e0bbb97..669b5f4 100644
  
  	/*
  	 * At this point we have high == low.
+@@ -1632,7 +1660,27 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
+ 
+ 	/* initialize tuple workspace to empty */
+ 	so->currPos.nextTupleOffset = 0;
++	if (btree_leaf_prefetch && pstate.continuescan && P_ISLEAF(opaque))
++	{
++		BlockNumber nextblkno;
++
++		if (ScanDirectionIsForward(dir) && !P_RIGHTMOST(opaque))
++			nextblkno = opaque->btpo_next;
++		else if (ScanDirectionIsBackward(dir) && !P_LEFTMOST(opaque))
++			nextblkno = opaque->btpo_prev;
++		else
++			nextblkno = InvalidBlockNumber;
+ 
++		if (BlockNumberIsValid(nextblkno))
++		{
++			// if (Debug_print_plan) elog(NOTICE, "nbtsearch.c: _bt_binsrch: btree leaf prefetch triggered: relation=\"%s\" block=%u dir=%s currpage=%u",
++			// 	 RelationGetRelationName(scan->indexRelation),
++			// 	 nextblkno,
++			// 	 ScanDirectionIsForward(dir) ? "forward" : "backward",
++			// 	 so->currPos.currPage);
++			PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, nextblkno);
++		}
++	}
+ 	/*
+ 	 * Now that the current page has been made consistent, the macro should be
+ 	 * good.
 diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
 index 878f4b2..b74148d 100644
 --- a/src/backend/access/nbtree/nbtutils.c
