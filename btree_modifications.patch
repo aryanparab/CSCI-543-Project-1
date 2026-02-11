@@ -1,11 +1,203 @@
 diff --git a/bin/postgres b/bin/postgres
-index 3e923c0..24bb682 100755
+index 3e923c0..defa0ea 100755
 Binary files a/bin/postgres and b/bin/postgres differ
+diff --git a/btree_modifications.patcg b/btree_modifications.patcg
+new file mode 100644
+index 0000000..07a6e83
+--- /dev/null
++++ b/btree_modifications.patcg
+@@ -0,0 +1,186 @@
++diff --git a/bin/postgres b/bin/postgres
++index 3e923c0..24bb682 100755
++Binary files a/bin/postgres and b/bin/postgres differ
++diff --git a/logfile b/logfile
++index 4817336..8dde9ce 100644
++--- a/logfile
+++++ b/logfile
++@@ -21,3 +21,15 @@
++ 2026-02-02 22:12:01.972 UTC [95508] LOG:  database system is ready to accept connections
++ 2026-02-02 22:17:02.032 UTC [95509] LOG:  checkpoint starting: time
++ 2026-02-02 22:17:02.077 UTC [95509] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.023 s, sync=0.002 s, total=0.049 s; sync files=2, longest=0.002 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC518, redo lsn=9/E5DC4C0
+++2026-02-03 08:01:01.488 UTC [44342] LOG:  starting PostgreSQL 17.4 on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, 64-bit
+++2026-02-03 08:01:01.494 UTC [44342] LOG:  listening on IPv6 address "::1", port 5432
+++2026-02-03 08:01:01.494 UTC [44342] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+++2026-02-03 08:01:01.496 UTC [44342] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+++2026-02-03 08:01:01.502 UTC [44345] LOG:  database system was interrupted; last known up at 2026-02-02 22:17:02 UTC
+++2026-02-03 08:01:01.569 UTC [44345] LOG:  database system was not properly shut down; automatic recovery in progress
+++2026-02-03 08:01:01.571 UTC [44345] LOG:  redo starts at 9/E5DC4C0
+++2026-02-03 08:01:01.571 UTC [44345] LOG:  invalid record length at 9/E5DC5C8: expected at least 24, got 0
+++2026-02-03 08:01:01.571 UTC [44345] LOG:  redo done at 9/E5DC590 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+++2026-02-03 08:01:01.574 UTC [44343] LOG:  checkpoint starting: end-of-recovery immediate wait
+++2026-02-03 08:01:01.577 UTC [44343] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.004 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC5C8, redo lsn=9/E5DC5C8
+++2026-02-03 08:01:01.580 UTC [44342] LOG:  database system is ready to accept connections
++diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
++index e0bbb97..2e47c17 100644
++--- a/src/backend/access/nbtree/nbtsearch.c
+++++ b/src/backend/access/nbtree/nbtsearch.c
++@@ -379,8 +379,35 @@ _bt_binsrch(Relation rel,
++ 	 * We can fall out when high == low.
++ 	 */
++ 	high++;						/* establish the loop invariant for high */
++-
+++	
++ 	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
+++	
+++
+++
+++	if (btree_binsrch_linear && P_ISLEAF(opaque))
+++	{
+++		int			n = high - low + 1;
+++
+++		if (n >= 2 && n <= btree_binsrch_linear_threshold)
+++		{
+++			// if (Debug_print_plan) elog(NOTICE, "nbtsearch.c: _bt_binsrch: btree binsrch linear triggered: n=%d threshold=%d dir=%s",
+++			// 	 n, btree_binsrch_linear_threshold,
+++			// 	 key->backward ? "backward" : "forward");
+++			cmpval = key->nextkey ? 0 : 1;
+++			if (key->backward)
+++			{
+++				for (OffsetNumber i = high; i >= low; i = OffsetNumberPrev(i))
+++					if (_bt_compare(rel, key, page, i) < cmpval)
+++						return i;
+++				return OffsetNumberPrev(low);
+++			}
+++			for (OffsetNumber i = low; i <= high; i = OffsetNumberNext(i))
+++				if (_bt_compare(rel, key, page, i) >= cmpval)
+++					return i;
+++			return OffsetNumberNext(high);
+++		}
+++	}
+++	else{
++ 
++ 	while (high > low)
++ 	{
++@@ -395,6 +422,7 @@ _bt_binsrch(Relation rel,
++ 		else
++ 			high = mid;
++ 	}
+++}
++ 
++ 	/*
++ 	 * At this point we have high == low.
++@@ -1632,7 +1660,27 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
++ 
++ 	/* initialize tuple workspace to empty */
++ 	so->currPos.nextTupleOffset = 0;
+++	if (btree_leaf_prefetch && pstate.continuescan && P_ISLEAF(opaque))
+++	{
+++		BlockNumber nextblkno;
+++
+++		if (ScanDirectionIsForward(dir) && !P_RIGHTMOST(opaque))
+++			nextblkno = opaque->btpo_next;
+++		else if (ScanDirectionIsBackward(dir) && !P_LEFTMOST(opaque))
+++			nextblkno = opaque->btpo_prev;
+++		else
+++			nextblkno = InvalidBlockNumber;
++ 
+++		if (BlockNumberIsValid(nextblkno))
+++		{
+++			// if (Debug_print_plan) elog(NOTICE, "nbtsearch.c: _bt_binsrch: btree leaf prefetch triggered: relation=\"%s\" block=%u dir=%s currpage=%u",
+++			// 	 RelationGetRelationName(scan->indexRelation),
+++			// 	 nextblkno,
+++			// 	 ScanDirectionIsForward(dir) ? "forward" : "backward",
+++			// 	 so->currPos.currPage);
+++			PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, nextblkno);
+++		}
+++	}
++ 	/*
++ 	 * Now that the current page has been made consistent, the macro should be
++ 	 * good.
++diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
++index 878f4b2..b74148d 100644
++--- a/src/backend/access/nbtree/nbtutils.c
+++++ b/src/backend/access/nbtree/nbtutils.c
++@@ -32,6 +32,11 @@
++ #define LOOK_AHEAD_REQUIRED_RECHECKS 	3
++ #define LOOK_AHEAD_DEFAULT_DISTANCE 	5
++ 
+++
+++bool btree_leaf_prefetch = false;
+++bool btree_binsrch_linear = false;
+++int btree_binsrch_linear_threshold = 4;
+++
++ typedef struct BTSortArrayContext
++ {
++ 	FmgrInfo   *sortproc;
++diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
++index c42fccf..04ce87c 100644
++--- a/src/backend/utils/misc/guc_tables.c
+++++ b/src/backend/utils/misc/guc_tables.c
++@@ -26,6 +26,7 @@
++ #include <syslog.h>
++ #endif
++ 
+++#include "access/nbtree.h"
++ #include "access/commit_ts.h"
++ #include "access/gin.h"
++ #include "access/slru.h"
++@@ -780,6 +781,24 @@ struct config_bool ConfigureNamesBool[] =
++ 		true,
++ 		NULL, NULL, NULL
++ 	},
+++	{
+++		{"btree_leaf_prefetch",PGC_USERSET,QUERY_TUNING_OTHER,
+++		gettext_noop("Enables prefetching of next leaf page during B-tree scans,"),
+++		NULL
+++	},
+++	&btree_leaf_prefetch,
+++	false,NULL,NULL,NULL
+++	},
+++	{
+++		{
+++			"btree_binsrch_linear",PGC_USERSET,QUERY_TUNING_OTHER,
+++			gettext_noop("Enables Linear Search for small B-tree lead pages."),
+++			NULL
+++		},
+++		&btree_binsrch_linear,
+++		false,NULL,NULL,NULL
+++
+++	},
++ 	{
++ 		{"enable_indexscan", PGC_USERSET, QUERY_TUNING_METHOD,
++ 			gettext_noop("Enables the planner's use of index-scan plans."),
++@@ -2046,6 +2065,17 @@ struct config_int ConfigureNamesInt[] =
++ 		0, 0, INT_MAX / 2,
++ 		NULL, NULL, NULL
++ 	},
+++	{
+++		{
+++			"btree_binsrch_linear_threshold",PGC_USERSET,QUERY_TUNING_OTHER,
+++			gettext_noop("Threshold to switch to linear search instead of binary search"),
+++			NULL,
+++		},
+++		&btree_binsrch_linear_threshold,
+++		4,1,32,
+++		NULL,NULL,NULL
+++
+++	},
++ 	{
++ 		{"post_auth_delay", PGC_BACKEND, DEVELOPER_OPTIONS,
++ 			gettext_noop("Sets the amount of time to wait after "
++diff --git a/src/include/access/nbtree.h b/src/include/access/nbtree.h
++index 7493043..a006d28 100644
++--- a/src/include/access/nbtree.h
+++++ b/src/include/access/nbtree.h
++@@ -1281,6 +1281,10 @@ extern bool _bt_first(IndexScanDesc scan, ScanDirection dir);
++ extern bool _bt_next(IndexScanDesc scan, ScanDirection dir);
++ extern Buffer _bt_get_endpoint(Relation rel, uint32 level, bool rightmost);
++ 
+++extern bool btree_leaf_prefetch;
+++extern bool btree_binsrch_linear;
+++extern int btree_binsrch_linear_threshold;
+++
++ /*
++  * prototypes for functions in nbtutils.c
++  */
 diff --git a/logfile b/logfile
-index 4817336..8dde9ce 100644
+index 4817336..c0999ce 100644
 --- a/logfile
 +++ b/logfile
-@@ -21,3 +21,15 @@
+@@ -21,3 +21,51 @@
  2026-02-02 22:12:01.972 UTC [95508] LOG:  database system is ready to accept connections
  2026-02-02 22:17:02.032 UTC [95509] LOG:  checkpoint starting: time
  2026-02-02 22:17:02.077 UTC [95509] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.023 s, sync=0.002 s, total=0.049 s; sync files=2, longest=0.002 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC518, redo lsn=9/E5DC4C0
@@ -21,83 +213,232 @@ index 4817336..8dde9ce 100644
 +2026-02-03 08:01:01.574 UTC [44343] LOG:  checkpoint starting: end-of-recovery immediate wait
 +2026-02-03 08:01:01.577 UTC [44343] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.004 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DC5C8, redo lsn=9/E5DC5C8
 +2026-02-03 08:01:01.580 UTC [44342] LOG:  database system is ready to accept connections
++2026-02-10 21:43:22.816 UTC [42612] LOG:  starting PostgreSQL 17.4 on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, 64-bit
++2026-02-10 21:43:22.818 UTC [42612] LOG:  listening on IPv6 address "::1", port 5432
++2026-02-10 21:43:22.818 UTC [42612] LOG:  listening on IPv4 address "127.0.0.1", port 5432
++2026-02-10 21:43:22.820 UTC [42612] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
++2026-02-10 21:43:22.824 UTC [42615] LOG:  database system was shut down at 2026-02-10 21:43:22 UTC
++2026-02-10 21:43:22.828 UTC [42612] LOG:  database system is ready to accept connections
++2026-02-10 21:43:57.364 UTC [43069] ERROR:  relation "company_type" does not exist at character 112
++2026-02-10 21:43:57.364 UTC [43069] STATEMENT:  SELECT MIN(mc.note) AS production_note, MIN(t.title) AS movie_title, MIN(t.production_year) AS movie_year FROM company_type AS ct, info_type AS it, movie_companies AS mc, movie_info_idx AS mi_idx, title AS t WHERE ct.kind = 'production companies' AND it.info = 'top 250 rank' AND mc.note  not like '%(as Metro-Goldwyn-Mayer Pictures)%' AND (mc.note like '%(co-production)%' or mc.note like '%(presents)%') AND ct.id = mc.company_type_id AND t.id = mc.movie_id AND t.id = mi_idx.movie_id AND mc.movie_id = mi_idx.movie_id AND it.id = mi_idx.info_type_id;
++2026-02-10 21:45:54.999 UTC [42612] LOG:  received fast shutdown request
++2026-02-10 21:45:55.002 UTC [42612] LOG:  aborting any active transactions
++2026-02-10 21:45:55.005 UTC [42612] LOG:  background worker "logical replication launcher" (PID 42618) exited with exit code 1
++2026-02-10 21:45:55.006 UTC [42613] LOG:  shutting down
++2026-02-10 21:45:55.008 UTC [42613] LOG:  checkpoint starting: shutdown immediate
++2026-02-10 21:45:55.023 UTC [42613] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.017 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DD550, redo lsn=9/E5DD550
++2026-02-10 21:45:55.026 UTC [42612] LOG:  database system is shut down
++2026-02-10 21:45:55.178 UTC [45306] LOG:  starting PostgreSQL 17.4 on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, 64-bit
++2026-02-10 21:45:55.181 UTC [45306] LOG:  listening on IPv6 address "::1", port 5432
++2026-02-10 21:45:55.181 UTC [45306] LOG:  listening on IPv4 address "127.0.0.1", port 5432
++2026-02-10 21:45:55.185 UTC [45306] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
++2026-02-10 21:45:55.189 UTC [45312] LOG:  database system was shut down at 2026-02-10 21:45:55 UTC
++2026-02-10 21:45:55.193 UTC [45306] LOG:  database system is ready to accept connections
++2026-02-10 21:46:20.639 UTC [45630] ERROR:  relation "company_type" does not exist at character 112
++2026-02-10 21:46:20.639 UTC [45630] STATEMENT:  SELECT MIN(mc.note) AS production_note, MIN(t.title) AS movie_title, MIN(t.production_year) AS movie_year FROM company_type AS ct, info_type AS it, movie_companies AS mc, movie_info_idx AS mi_idx, title AS t WHERE ct.kind = 'production companies' AND it.info = 'top 250 rank' AND mc.note  not like '%(as Metro-Goldwyn-Mayer Pictures)%' AND (mc.note like '%(co-production)%' or mc.note like '%(presents)%') AND ct.id = mc.company_type_id AND t.id = mc.movie_id AND t.id = mi_idx.movie_id AND mc.movie_id = mi_idx.movie_id AND it.id = mi_idx.info_type_id;
++2026-02-10 21:49:13.417 UTC [54442] ERROR:  relation "company_type" does not exist at character 112
++2026-02-10 21:49:13.417 UTC [54442] STATEMENT:  SELECT MIN(mc.note) AS production_note, MIN(t.title) AS movie_title, MIN(t.production_year) AS movie_year FROM company_type AS ct, info_type AS it, movie_companies AS mc, movie_info_idx AS mi_idx, title AS t WHERE ct.kind = 'production companies' AND it.info = 'top 250 rank' AND mc.note  not like '%(as Metro-Goldwyn-Mayer Pictures)%' AND (mc.note like '%(co-production)%' or mc.note like '%(presents)%') AND ct.id = mc.company_type_id AND t.id = mc.movie_id AND t.id = mi_idx.movie_id AND mc.movie_id = mi_idx.movie_id AND it.id = mi_idx.info_type_id;
++2026-02-10 21:50:55.200 UTC [45310] LOG:  checkpoint starting: time
++2026-02-10 21:50:55.227 UTC [45310] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.016 s, sync=0.001 s, total=0.028 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=9/E5DD658, redo lsn=9/E5DD600
++2026-02-10 21:53:13.283 UTC [67394] ERROR:  relation "company_type" does not exist at character 112
++2026-02-10 21:53:13.283 UTC [67394] STATEMENT:  SELECT MIN(mc.note) AS production_note, MIN(t.title) AS movie_title, MIN(t.production_year) AS movie_year FROM company_type AS ct, info_type AS it, movie_companies AS mc, movie_info_idx AS mi_idx, title AS t WHERE ct.kind = 'production companies' AND it.info = 'top 250 rank' AND mc.note  not like '%(as Metro-Goldwyn-Mayer Pictures)%' AND (mc.note like '%(co-production)%' or mc.note like '%(presents)%') AND ct.id = mc.company_type_id AND t.id = mc.movie_id AND t.id = mi_idx.movie_id AND mc.movie_id = mi_idx.movie_id AND it.id = mi_idx.info_type_id;
++2026-02-10 21:53:57.378 UTC [45306] LOG:  received fast shutdown request
++2026-02-10 21:53:57.380 UTC [45306] LOG:  aborting any active transactions
++2026-02-10 21:53:57.385 UTC [45306] LOG:  background worker "logical replication launcher" (PID 45315) exited with exit code 1
++2026-02-10 21:53:57.386 UTC [45310] LOG:  shutting down
++2026-02-10 21:53:57.388 UTC [45310] LOG:  checkpoint starting: shutdown immediate
++2026-02-10 21:53:57.421 UTC [45310] LOG:  checkpoint complete: wrote 0 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.020 s, sync=0.001 s, total=0.033 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=0 kB; lsn=9/E5DD708, redo lsn=9/E5DD708
++2026-02-10 21:53:57.429 UTC [45306] LOG:  database system is shut down
 diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
-index e0bbb97..2e47c17 100644
+index e0bbb97..e6ba986 100644
 --- a/src/backend/access/nbtree/nbtsearch.c
 +++ b/src/backend/access/nbtree/nbtsearch.c
-@@ -379,8 +379,35 @@ _bt_binsrch(Relation rel,
+@@ -378,23 +378,98 @@ _bt_binsrch(Relation rel,
+ 	 *
  	 * We can fall out when high == low.
  	 */
- 	high++;						/* establish the loop invariant for high */
--
+-	high++;						/* establish the loop invariant for high */
 +	
- 	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
 +	
-+
-+
-+	if (btree_binsrch_linear && P_ISLEAF(opaque))
-+	{
-+		int			n = high - low + 1;
-+
-+		if (n >= 2 && n <= btree_binsrch_linear_threshold)
-+		{
-+			// if (Debug_print_plan) elog(NOTICE, "nbtsearch.c: _bt_binsrch: btree binsrch linear triggered: n=%d threshold=%d dir=%s",
-+			// 	 n, btree_binsrch_linear_threshold,
-+			// 	 key->backward ? "backward" : "forward");
-+			cmpval = key->nextkey ? 0 : 1;
-+			if (key->backward)
-+			{
-+				for (OffsetNumber i = high; i >= low; i = OffsetNumberPrev(i))
-+					if (_bt_compare(rel, key, page, i) < cmpval)
-+						return i;
-+				return OffsetNumberPrev(low);
-+			}
-+			for (OffsetNumber i = low; i <= high; i = OffsetNumberNext(i))
-+				if (_bt_compare(rel, key, page, i) >= cmpval)
-+					return i;
-+			return OffsetNumberNext(high);
-+		}
-+	}
-+	else{
  
- 	while (high > low)
- 	{
-@@ -395,6 +422,7 @@ _bt_binsrch(Relation rel,
- 		else
- 			high = mid;
- 	}
+-	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
+ 
+-	while (high > low)
+-	{
+-		OffsetNumber mid = low + ((high - low) / 2);
++   low = P_FIRSTDATAKEY(opaque);
++high = PageGetMaxOffsetNumber(page);
+ 
+-		/* We have low <= mid < high, so mid points at a real slot */
++if (unlikely(high < low))
++    return low;
+ 
+-		result = _bt_compare(rel, key, page, mid);
++/* Save real maxoff BEFORE incrementing high */
++OffsetNumber maxoff = high;
+ 
+-		if (result >= cmpval)
+-			low = mid + 1;
+-		else
+-			high = mid;
+-	}
++high++;  /* establish the loop invariant for high */
++
++cmpval = key->nextkey ? 0 : 1;
++
++/*
++ * Linear scan shortcut for tiny leaf pages.
++ *
++ * When btree_binsrch_linear is enabled and a leaf page has very few
++ * items (<= btree_binsrch_linear_threshold), replace binary search
++ * with a simple linear scan. This avoids branch misprediction and
++ * loop overhead for tiny pages.
++ *
++ * Return value semantics must exactly match the binary search below:
++ *
++ * Forward (!key->backward):
++ *   Return first offset i where _bt_compare() < cmpval
++ *   (i.e. first item >= scankey, or > scankey if nextkey=true)
++ *   If no such item, return maxoff+1 (same as binsrch low==high==maxoff+1)
++ *
++ * Backward (key->backward):
++ *   Return last offset i where _bt_compare() < cmpval
++ *   (i.e. last item < scankey, or <= scankey if nextkey=true)
++ *   If no such item, fall through to binary search which converges
++ *   to low, then the P_ISLEAF block returns OffsetNumberPrev(low).
++ *
++ * Safety: never runs on internal pages (P_ISLEAF guard).
++ */
++if (btree_binsrch_linear && P_ISLEAF(opaque))
++{
++    int     n = (int) maxoff - (int) low + 1;
++
++    if (n >= 2 && n <= btree_binsrch_linear_threshold)
++    {
++        if (!key->backward)
++        {
++            /* Forward: scan low to maxoff, return first match */
++            for (OffsetNumber i = low; i <= maxoff; i++)
++            {
++                if (_bt_compare(rel, key, page, i) < cmpval)
++                    return i;
++            }
++            /*
++             * All items compare >= cmpval meaning all are before
++             * our target. Return one past last slot, identical to
++             * binary search result when low advances to maxoff+1.
++             */
++            return (OffsetNumber)(maxoff + 1);
++        }
++        else
++        {
++            /* Backward: scan maxoff to low, return first match */
++            for (OffsetNumber i = maxoff; i >= low; i--)
++            {
++                if (_bt_compare(rel, key, page, i) < cmpval)
++                    return i;
++            }
++            /*
++             * No match found. Fall through to binary search below,
++             * which converges to low. The P_ISLEAF backward block
++             * then returns OffsetNumberPrev(low) correctly.
++             */
++        }
++    }
 +}
++
++/* Standard binary search — always reachable as fallback */
++while (high > low)
++{
++    OffsetNumber mid = low + ((high - low) / 2);
++
++    result = _bt_compare(rel, key, page, mid);
++
++    if (result >= cmpval)
++        low = mid + 1;
++    else
++        high = mid;
++}
++
++/* P_ISLEAF block follows unchanged... */
  
  	/*
  	 * At this point we have high == low.
-@@ -1632,7 +1660,27 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
+@@ -1631,13 +1706,68 @@ _bt_readpage(IndexScanDesc scan, ScanDirection dir, OffsetNumber offnum,
+ 	so->currPos.dir = dir;
  
  	/* initialize tuple workspace to empty */
- 	so->currPos.nextTupleOffset = 0;
-+	if (btree_leaf_prefetch && pstate.continuescan && P_ISLEAF(opaque))
-+	{
-+		BlockNumber nextblkno;
+-	so->currPos.nextTupleOffset = 0;
++so->currPos.nextTupleOffset = 0;
 +
-+		if (ScanDirectionIsForward(dir) && !P_RIGHTMOST(opaque))
-+			nextblkno = opaque->btpo_next;
-+		else if (ScanDirectionIsBackward(dir) && !P_LEFTMOST(opaque))
-+			nextblkno = opaque->btpo_prev;
-+		else
-+			nextblkno = InvalidBlockNumber;
++/*
++ * Prechecking continuescan for the last item on the page before
++ * processing all items. 
++ */
++if (!firstPage && !so->scanBehind && minoff < maxoff)
++{
++    ItemId      iid;
++    IndexTuple  itup;
++
++    iid = PageGetItemId(page, ScanDirectionIsForward(dir) ? maxoff : minoff);
++    itup = (IndexTuple) PageGetItem(page, iid);
++
++    /* Call with arrayKeys=false to avoid undesirable side-effects */
++    _bt_checkkeys(scan, &pstate, false, itup, indnatts);
++    pstate.prechecked = pstate.continuescan;
++    pstate.continuescan = true; /* reset */
++}
++
++/*
++ * Leaf-page lookahead prefetch.
++ *
++ * Issue a non-blocking prefetch hint for the next sibling leaf page
++ * to overlap I/O with CPU processing of the current page.
++ *
++ * Placed AFTER the precheck so we use pstate.prechecked as the
++ * continuation signal rather than the default pstate.continuescan=true.
++ * This avoids wasteful prefetches when:
++ *   - The precheck determined the scan ends on this page
++ *   - Array key scans (like IN lists) that jump non-sequentially
++ *
++ * Guard conditions:
++ *   1. btree_leaf_prefetch must be enabled
++ *   2. pstate.prechecked=true means last item passed key checks,
++ *      so scan genuinely continues to next sibling
++ *   3. Must be a leaf page (sibling pointers are only meaningful
++ *      on leaf pages for sequential scans)
++ *   4. Boundary checks prevent reading invalid sibling pointers
++ *
++ * Non-blocking: PrefetchBuffer is only an I/O hint. If the prefetch
++ * becomes stale due to a concurrent split, correctness is unaffected.
++ */
++if (btree_leaf_prefetch && pstate.prechecked && P_ISLEAF(opaque))
++{
++    BlockNumber nextblkno;
++
++    if (ScanDirectionIsForward(dir) && !P_RIGHTMOST(opaque))
++        nextblkno = opaque->btpo_next;
++    else if (ScanDirectionIsBackward(dir) && !P_LEFTMOST(opaque))
++        nextblkno = opaque->btpo_prev;
++    else
++        nextblkno = InvalidBlockNumber;
++
++    if (BlockNumberIsValid(nextblkno))
++        PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, nextblkno);
++}
++
++Assert(BTScanPosIsPinned(so->currPos));
++
++
  
-+		if (BlockNumberIsValid(nextblkno))
-+		{
-+			// if (Debug_print_plan) elog(NOTICE, "nbtsearch.c: _bt_binsrch: btree leaf prefetch triggered: relation=\"%s\" block=%u dir=%s currpage=%u",
-+			// 	 RelationGetRelationName(scan->indexRelation),
-+			// 	 nextblkno,
-+			// 	 ScanDirectionIsForward(dir) ? "forward" : "backward",
-+			// 	 so->currPos.currPage);
-+			PrefetchBuffer(scan->indexRelation, MAIN_FORKNUM, nextblkno);
-+		}
-+	}
+-	/*
+-	 * Now that the current page has been made consistent, the macro should be
+-	 * good.
+-	 */
+-	Assert(BTScanPosIsPinned(so->currPos));
+ 
  	/*
- 	 * Now that the current page has been made consistent, the macro should be
- 	 * good.
+ 	 * Prechecking the value of the continuescan flag for the last item on the
 diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
 index 878f4b2..b74148d 100644
 --- a/src/backend/access/nbtree/nbtutils.c
